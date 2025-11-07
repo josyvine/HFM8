@@ -2,9 +2,11 @@ package com.hfm.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Bundle;
 import android.text.format.Formatter;
 import android.util.Log;
@@ -19,6 +21,7 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -66,6 +69,9 @@ public class HFMDropActivity extends Activity {
     private DropRequestAdapter adapter;
     private List<DropRequest> requestList;
 
+    // --- NEW: BroadcastReceiver for download errors ---
+    private BroadcastReceiver downloadErrorReceiver;
+
     private static final String[] ADJECTIVES = {"Red", "Blue", "Green", "Silent", "Fast", "Brave", "Ancient", "Wandering", "Golden", "Iron"};
     private static final String[] NOUNS = {"Tiger", "Lion", "Eagle", "Fox", "Wolf", "River", "Mountain", "Star", "Comet", "Shadow"};
 
@@ -79,18 +85,24 @@ public class HFMDropActivity extends Activity {
         initializeFirebase();
         setupRecyclerView();
         setupListeners();
+        // --- NEW: Set up the broadcast receiver ---
+        setupBroadcastReceiver();
     }
 
     @Override
     protected void onStart() {
         super.onStart();
         checkCurrentUser();
+        // --- NEW: Register the broadcast receiver ---
+        LocalBroadcastManager.getInstance(this).registerReceiver(downloadErrorReceiver, new IntentFilter(DownloadService.ACTION_DOWNLOAD_ERROR));
     }
 
     @Override
     protected void onStop() {
         super.onStop();
         removeListener();
+        // --- NEW: Unregister the broadcast receiver ---
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(downloadErrorReceiver);
     }
 
     private void initializeViews() {
@@ -150,6 +162,44 @@ public class HFMDropActivity extends Activity {
         });
     }
 
+    // --- NEW: Method to define the broadcast receiver ---
+    private void setupBroadcastReceiver() {
+        downloadErrorReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (DownloadService.ACTION_DOWNLOAD_ERROR.equals(intent.getAction())) {
+                    String errorReport = intent.getStringExtra(DownloadService.EXTRA_ERROR_MESSAGE);
+                    if (errorReport != null && !errorReport.isEmpty()) {
+                        showErrorDialog(errorReport);
+                    } else {
+                        showErrorDialog("An unknown download error occurred.");
+                    }
+                }
+            }
+        };
+    }
+
+    // --- NEW: Method to build and show the error alert dialog ---
+    private void showErrorDialog(String errorReport) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Transfer Failed: Error Report");
+        builder.setMessage(errorReport);
+        builder.setPositiveButton("Close", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                dialog.dismiss();
+            }
+        });
+
+        AlertDialog dialog = builder.create();
+        dialog.show();
+    }
+
+
     private void checkCurrentUser() {
         currentUser = mAuth.getCurrentUser();
         if (currentUser == null) {
@@ -192,7 +242,6 @@ public class HFMDropActivity extends Activity {
                     } else {
                         Log.w(TAG, "User account deletion failed.", task.getException());
                         Toast.makeText(HFMDropActivity.this, "Failed to regenerate ID.", Toast.LENGTH_SHORT).show();
-                        // Re-enable UI with old user if deletion fails
                         updateUiWithUser(currentUser);
                     }
                 }
@@ -270,7 +319,6 @@ public class HFMDropActivity extends Activity {
             return;
         }
 
-        // Add the receiver's ID to the document to satisfy security rules.
         Map<String, Object> updates = new HashMap<>();
         updates.put("status", "accepted");
         updates.put("receiverId", currentUser.getUid());
@@ -283,12 +331,9 @@ public class HFMDropActivity extends Activity {
                     Intent intent = new Intent(HFMDropActivity.this, DownloadService.class);
                     intent.putExtra("drop_request_id", request.id);
                     intent.putExtra("sender_id", request.senderId);
-
-                    // Bug Fix: Pass both original filename (for saving) and cloaked filename (for requesting)
                     intent.putExtra("original_filename", request.filename);
                     intent.putExtra("cloaked_filename", request.cloakedFilename);
-
-                    intent.putExtra("filesize", request.filesize); // This is the cloaked file size
+                    intent.putExtra("filesize", request.filesize);
                     ContextCompat.startForegroundService(HFMDropActivity.this, intent);
                 }
             })
@@ -301,7 +346,6 @@ public class HFMDropActivity extends Activity {
             });
 
 
-        // Remove from list and update UI immediately
         requestList.remove(request);
         adapter.notifyDataSetChanged();
         if (requestList.isEmpty()) {
@@ -314,7 +358,6 @@ public class HFMDropActivity extends Activity {
         updates.put("status", "declined");
         db.collection("drop_requests").document(request.id).update(updates);
 
-        // Remove from list and update UI immediately
         requestList.remove(request);
         adapter.notifyDataSetChanged();
         if (requestList.isEmpty()) {
@@ -322,20 +365,18 @@ public class HFMDropActivity extends Activity {
         }
     }
 
-    // --- Data Model and Adapter ---
-
     public static class DropRequest {
-        public String id; // Firestore document ID
+        public String id;
         public String senderId;
         public String senderUsername;
         public String receiverUsername;
-        public String filename;         // This is the original filename, for display purposes.
-        public String cloakedFilename;  // The filename to request from the sender's server.
-        public long filesize;           // This is the size of the cloaked file.
+        public String filename;
+        public String cloakedFilename;
+        public long filesize;
         public String status;
-        public String receiverId;       // Added for security rules
+        public String receiverId;
 
-        public DropRequest() {} // Needed for Firestore
+        public DropRequest() {}
     }
 
     public static class DropRequestAdapter extends RecyclerView.Adapter<DropRequestAdapter.ViewHolder> {
